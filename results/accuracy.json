@@ -1,0 +1,26 @@
+{
+ "hf-float16": {
+  "mean_err": 0.016635915264487267,
+  "max_err": 0.6862926483154297,
+  "greedy_match": 8,
+  "n": 8
+ },
+ "qweninfer-float16": {
+  "mean_err": 0.008977981749922037,
+  "max_err": 0.22101688385009766,
+  "greedy_match": 8,
+  "n": 8
+ },
+ "hf-bfloat16": {
+  "mean_err": 0.09106621937826276,
+  "max_err": 1.82004976272583,
+  "greedy_match": 3,
+  "n": 8
+ },
+ "qweninfer-bfloat16": {
+  "mean_err": 0.07541159261018038,
+  "max_err": 1.6740295886993408,
+  "greedy_match": 2,
+  "n": 8
+ }
+}

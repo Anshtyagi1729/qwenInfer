@@ -5,15 +5,15 @@
 QwenInfer runs Qwen2.5-0.5B on a 2 GB laptop GPU (NVIDIA MX450) with a
 forward pass, KV cache and decode loop written from scratch in PyTorch. It is
 verified against HuggingFace `transformers` by exact logit parity, and decodes
-**1.7–1.8× faster than HuggingFace** on the same hardware, reaching **84% of the
+**1.7–1.8× faster than HuggingFace** on the same hardware, reaching **83% of the
 GPU's memory-bandwidth limit**.
 
 ```
                     decode latency, ms/token (lower is better)
 context   QwenInfer   HF DynamicCache   HF StaticCache   speedup vs best HF
-   16       24.50          42.05             56.67            1.72x
-  256       26.34          44.95             56.64            1.71x
- 1024       31.12          57.04             56.68            1.82x
+   16       24.62          41.90             56.40            1.70x
+  256       26.48          44.81             56.42            1.69x
+ 1024       31.22          56.91             56.39            1.81x
 ```
 
 ## Highlights
@@ -22,8 +22,10 @@ context   QwenInfer   HF DynamicCache   HF StaticCache   speedup vs best HF
   grouped-query attention, SwiGLU, tied embeddings, KV cache, with no model code
   from `transformers`.
 - **Verified, not eyeballed.** Per-layer hidden states, final logits and greedy
-  decoding all match HuggingFace. In fp16 QwenInfer deviates from the fp32 ground
-  truth *less* than HuggingFace's own fp16 path (max 0.13 vs 0.31).
+  decoding all match HuggingFace. Across 8 prompts, QwenInfer's fp16 logits
+  deviate from the fp32 ground truth about half as much as HuggingFace's own fp16
+  path (mean 0.009 vs 0.017, max 0.22 vs 0.69), because the residual stream is
+  kept in fp32.
 - **Profiling-driven 1.7× decode speedup** from a single change in weight
   layout; see [the main finding](#the-main-finding-a-kernel-built-for-hardware-this-gpu-does-not-have).
 - **A KV cache that stays flat as context grows**, where HuggingFace's two caches
@@ -55,7 +57,7 @@ reads and is dispatched to a GEMV kernel. QwenInfer therefore **repacks weights
 once at load time**: projections transposed, Q/K/V fused into one matrix,
 gate/up fused into one. That cuts 72 kernel launches per token, changes no
 outputs (all parity tests run through the repacked path), and took decode from
-42.3 to 24.5 ms/token. Prefill also got slightly faster rather than regressing.
+42.3 to 24.6 ms/token. Prefill also got slightly faster rather than regressing.
 
 ## The KV cache
 
@@ -103,6 +105,29 @@ the tests.
 | `test_incremental_decode_matches_full_recompute` | cached decode == recomputing from scratch, every step |
 | `test_generate_matches_hf_greedy` | end-to-end cached generation == HF |
 | `test_ragged_batch_matches_individual` | different-length sequences batched == each alone |
+
+### Numerical accuracy
+
+Logit error against the fp32 ground truth over 8 fixed prompts, and how many
+greedy 32-token continuations are identical to fp32
+([`qweninfer/bench/accuracy.py`](qweninfer/bench/accuracy.py)):
+
+```
+config               mean err   max err   greedy = fp32
+HF fp16               0.0166     0.686        8/8
+QwenInfer fp16        0.0090     0.221        8/8
+HF bf16               0.0911     1.820        3/8
+QwenInfer bf16        0.0754     1.674        2/8
+```
+
+All 24 blocks add into the residual stream, so rounding it to 16 bits accumulates
+error across the full depth. QwenInfer keeps the stream in fp32 (896 values per
+token, effectively free: +0.1 ms/token) while matmuls run in 16 bits, which
+halves the mean error. bf16 is less accurate in both implementations because
+every matmul input is rounded to 8 mantissa bits; QwenInfer's bf16 error is
+below HuggingFace's own.
+
+### Harness notes
 
 Two early failures turned out to be HuggingFace behaviour rather than model bugs:
 HF stores the final-normed stream in its last `hidden_states` entry, and

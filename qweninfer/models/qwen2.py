@@ -16,6 +16,10 @@ Design decisions, each explained where it is implemented:
      to (in, out) and q/k/v and gate/up concatenated. Decode multiplies ONE row
      by each weight matrix, and on this GPU the transposed layout runs at 91% of
      memory bandwidth versus 34% for nn.Linear's layout (scripts/gemv_layout.py).
+  7. Optionally the residual stream is kept in fp32 while matmuls run in the
+     weight dtype. All 24 blocks add into the stream, so rounding it to 16 bits
+     accumulates error across the whole depth; the stream is only 896 values per
+     token, so keeping it in fp32 is nearly free.
 """
 
 from __future__ import annotations
@@ -226,16 +230,23 @@ class Block(nn.Module):
         self.mlp = MLP(cfg)
 
     def forward(self, x, cos, sin, positions, cache=None) -> torch.Tensor:
-        x = x + self.self_attn(self.input_layernorm(x), cos, sin, positions, cache)
-        x = x + self.mlp(self.post_attention_layernorm(x))
+        # x is the residual stream, possibly fp32. Sublayers compute in the weight
+        # dtype; their outputs are cast back before being added in. When the
+        # dtypes already match these casts are no-ops.
+        w = self.post_attention_layernorm.weight.dtype
+        x = x + self.self_attn(self.input_layernorm(x).to(w), cos, sin, positions,
+                               cache).to(x.dtype)
+        x = x + self.mlp(self.post_attention_layernorm(x).to(w)).to(x.dtype)
         return x
 
 
 class Qwen2(nn.Module):
-    def __init__(self, cfg: Qwen2Config, max_seq_len: int = 4096) -> None:
+    def __init__(self, cfg: Qwen2Config, max_seq_len: int = 4096,
+                 residual_fp32: bool = False) -> None:
         super().__init__()
         self.cfg = cfg
         self.max_seq_len = max_seq_len
+        self.residual_fp32 = residual_fp32
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
         self.layers = nn.ModuleList(Block(cfg, i) for i in range(cfg.num_hidden_layers))
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
@@ -264,9 +275,11 @@ class Qwen2(nn.Module):
             x = self.embed_t[:, input_ids].permute(1, 2, 0).contiguous()
         else:
             x = self.embed_tokens(input_ids)
+        if self.residual_fp32:
+            x = x.float()
         for layer in self.layers:
             x = layer(x, self.rope_cos, self.rope_sin, positions, cache)
-        x = self.norm(x)
+        x = self.norm(x).to(self.dtype)
 
         # The output head is 896 x 151936 per token. Generation only needs the
         # last position; a 1024-token prompt would otherwise produce 311 MB of
@@ -298,7 +311,7 @@ class Qwen2(nn.Module):
     def from_pretrained(
         cls, path: str | Path, dtype: torch.dtype = torch.float16,
         device: str | torch.device = "cuda", max_seq_len: int = 4096,
-        fuse: bool = True,
+        fuse: bool = True, residual_fp32: bool = True,
     ) -> "Qwen2":
         path = Path(path)
         cfg = Qwen2Config.from_json(path / "config.json")
@@ -307,7 +320,7 @@ class Qwen2(nn.Module):
         # parameters this way costs nothing, instead of random-initialising
         # weights we are about to overwrite.
         with torch.device("meta"):
-            model = cls(cfg, max_seq_len)
+            model = cls(cfg, max_seq_len, residual_fp32)
 
         state = load_file(path / "model.safetensors", device="cpu")
         state = {k.removeprefix("model."): t.to(dtype) for k, t in state.items()}
