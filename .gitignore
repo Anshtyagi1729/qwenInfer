@@ -1,0 +1,15 @@
+# environment and large artifacts
+.venv/
+weights/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# personal learning notes and exploratory scripts (not part of the project)
+notes/
+scratch/
+
+# editor configuration
+.zed/
+.vscode/
+pyrightconfig.json

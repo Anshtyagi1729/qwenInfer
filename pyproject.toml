@@ -1,0 +1,35 @@
+[project]
+name = "qweninfer"
+version = "0.1.0"
+description = "QwenInfer: a from-scratch LLM inference engine for memory-constrained GPUs"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch==2.6.0",
+    "numpy",
+    "transformers>=4.44",
+    "tokenizers",
+    "safetensors",
+    "huggingface-hub",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "rich", "matplotlib"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["qweninfer"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --tb=short"
