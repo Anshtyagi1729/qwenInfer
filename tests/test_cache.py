@@ -88,3 +88,39 @@ def test_ragged_batch_matches_individual(model, tokenizer):
         alone = _full_last_logits(model, torch.cat([ids, nxt[i : i + 1]], dim=1))
         d = (batched[i] - alone[0]).abs().max().item()
         assert d < TOL, f"sequence {i}: batched vs alone differ by {d:.3e}"
+
+
+def test_engine_matches_individual_generation(model, tokenizer):
+    """Continuous batching must not change any request's output.
+
+    Six requests of different prompt and output lengths through an engine with
+    only 2 slots: this exercises admission, decode at mixed positions, retiring
+    out of order, row compaction and slot reuse. Every output must equal what the
+    request produces when generated alone.
+    """
+    from qweninfer.engine.engine import Engine, Request
+
+    texts = ["Water boils at", "The largest planet in the solar system is",
+             "def add(a, b):", "Paris is the capital of",
+             "The speed of light is approximately", "Machine learning is"]
+    lens = [5, 12, 3, 9, 7, 4]
+    reqs = [Request(i, tokenizer(t).input_ids, n) for i, (t, n) in enumerate(zip(texts, lens))]
+    expected = [generate(model, torch.tensor([r.prompt]), r.max_new_tokens) for r in reqs]
+
+    engine = Engine(model, max_slots=2, max_len=64)
+    got = engine.run(reqs)
+    for r, exp in zip(got, expected):
+        assert r.output == exp, f"request {r.rid}:\n  engine: {r.output}\n  alone:  {exp}"
+
+
+def test_engine_padding_does_not_change_outputs(model, tokenizer):
+    """Dummy padding rows must be invisible to real requests."""
+    from qweninfer.engine.engine import Engine, Request
+
+    texts = ["Water boils at", "The largest planet is", "def add(a, b):"]
+    def reqs():
+        return [Request(i, tokenizer(t).input_ids, 6) for i, t in enumerate(texts)]
+    plain = Engine(model, max_slots=4, max_len=64).run(reqs())
+    padded = Engine(model, max_slots=4, max_len=64, pad_to=[0, 4, 4, 4, 4]).run(reqs())
+    for a, b in zip(plain, padded):
+        assert a.output == b.output, f"request {a.rid}: {a.output} vs {b.output}"
